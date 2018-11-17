@@ -1,4 +1,4 @@
-#q2-abundance-filtering
+# q2-abundance-filtering
 
 This is a QIIME 2 plugin for abundance-filtering of sequences according to the method of Wang et al. (see citation).  
 For details on QIIME 2, see https://qiime2.org.
