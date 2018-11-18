@@ -7,10 +7,11 @@ import biom
 import skbio
 import yaml
 
+
 from q2_types.per_sample_sequences import (
             SingleLanePerSampleSingleEndFastqDirFmt,
-            FastqManifestFormat, YamlFormat, FastqGzFormat, QIIME1DemuxDirFmt)
-
+            FastqManifestFormat, YamlFormat, FastqGzFormat, QIIME1DemuxDirFmt
+            )
 
 
 def biomtable_to_dataframe(biom_table_object):
@@ -120,16 +121,7 @@ def abundance_filter_seqs(demux: SingleLanePerSampleSingleEndFastqDirFmt,
     
     for i, (fname, fastqz) in enumerate(iterator):
         sample_id = demux_manifest.loc[str(fname)]['sample-id']
-
-        # per q2-demux, barcode ID, lane number and read number are not
-        # relevant here
-        path = result.sequences.path_maker(sample_id=sample_id,
-                                           barcode_id=i,
-                                           lane_number=1,
-                                           read_number=1)
-
-        
-        
+                
         # per q2-demux, barcode ID, lane number and read number are not
         # relevant here
         path = result.sequences.path_maker(sample_id=sample_id,
@@ -146,11 +138,12 @@ def abundance_filter_seqs(demux: SingleLanePerSampleSingleEndFastqDirFmt,
         
         sampled_counts_series = filtered_counts_df[sample_id]
         seqs_in_sample = list(sampled_counts_series[sampled_counts_series > 0].index)
-        
+
+  
         log_records_totalread_counts[sample_id] = 0
 
         for seq in seqs_iterator:
-            sha1_hash = hashlib.sha1(str(seq).encode('utf-8')).hexdigest()
+            sha1_hash = hashlib.sha1(seq._string).hexdigest()
             if sha1_hash in seqs_in_sample:
                 log_records_totalread_counts[sample_id] += 1
                 if writer is None:
@@ -161,14 +154,13 @@ def abundance_filter_seqs(demux: SingleLanePerSampleSingleEndFastqDirFmt,
                 seq_string = seq_strIO.getvalue()
 
                 writer.write(seq_string.encode('utf-8'))
-        
-
+                
         if writer is not None:
             manifest_fh.write('%s,%s,%s\n' % (sample_id, path.name, 'forward'))
             
             writer.close()
             
-
+    
     if set(log_records_totalread_counts.values()) == {0, }:
         raise ValueError("All sequences from all samples were filtered out. "
                          "The parameter choices may be too stringent for the "
@@ -199,8 +191,10 @@ def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> Singl
 
     counts_df = biomtable_to_dataframe(dereplicated_table).astype(int)
     
-    
-    filtered_df = pd.DataFrame()
+    #list to keep track of 
+    #abundance-filtered seq counts for each sample as series;
+    #after the loop we 'concat' them into a dataframe
+    sample_series_lst = []
     
     for sample in counts_df.columns:
         
@@ -208,16 +202,22 @@ def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> Singl
         
         threshold = abundance_filter_threshold_Wang_et_al(sample_col.to_frame())
     
-        filtered_df[sample] = sample_col[sample_col > threshold]
+        sample_series = sample_col[sample_col > threshold].copy()
+
+        sample_series_lst.append(sample_series)
         
-        seq_ids_to_keep = sample_col[sample_col > threshold].index
+        seq_ids_to_keep = sample_series.index
         
-        n_kept = len(list(seq_ids_to_keep))
+        n_kept = sample_col[seq_ids_to_keep].sum()
         
-        print("Abundance filtering threshold for sample {} set at > {} counts. {} *unique* sequences kept.".format(sample,
+        n_unique_kept = len(list(seq_ids_to_keep))
+        
+        print("Abundance filtering threshold for sample {} set at > {} counts. {} sequences ({} unique) kept.".format(sample,
                                                                                                                    str(threshold),
-                                                                                                                   str(n_kept)))
+                                                                                                                   str(n_kept),
+                                                                                                                   str(n_unique_kept)))
     
+    filtered_df = pd.concat(sample_series_lst, axis=1)
     filtered_df = filtered_df.fillna(0).astype(int)
     
     #exclude these sequences that were excluded from all samples
@@ -230,5 +230,4 @@ def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> Singl
                                     filtered_counts_df=filtered_df)
     
     return af_seqs
-
 
