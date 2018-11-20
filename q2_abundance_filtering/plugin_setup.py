@@ -11,6 +11,8 @@ citations = qiime2.plugin.Citations.load('citations.bib', package='q2_abundance_
 
 
 import q2_abundance_filtering
+from q2_abundance_filtering._type import AbundanceFilteringStats
+from q2_abundance_filtering._format import AbundanceFilteringStatsFmt, AbundanceFilteringStatsDirFmt
 
 plugin = qiime2.plugin.Plugin(
     name='abundance-filtering',
@@ -23,6 +25,11 @@ plugin = qiime2.plugin.Plugin(
     citations=[citations['Wang2018']]
 )
 
+plugin.register_formats(AbundanceFilteringStatsFmt, AbundanceFilteringStatsDirFmt)
+plugin.register_semantic_types(AbundanceFilteringStats)
+plugin.register_semantic_type_to_format(AbundanceFilteringStats, artifact_format=AbundanceFilteringStatsDirFmt)
+
+
 plugin.methods.register_function(
     function=q2_abundance_filtering.abundance_filter,
     inputs={
@@ -32,7 +39,8 @@ plugin.methods.register_function(
     parameters={
     },
     outputs=[
-        ('filtered_sequences', SampleData[SequencesWithQuality])
+        ('filtered_sequences', SampleData[SequencesWithQuality]),
+        ('stats', AbundanceFilteringStats)
     ],
     input_descriptions={
         'sequences': "The input sequences."
@@ -41,6 +49,7 @@ plugin.methods.register_function(
     },
     output_descriptions={
         'filtered_sequences': 'The filtered sequences.',
+        'stats': 'Abundance-filtering stats for each sample.'
     },
     name='Abundance filtering',
     description=('Filter low-abundance sequences according to the method of Wang et al. Requires the dereplicated sequences as well as the dereplicated sequence counts table. '
@@ -48,3 +57,7 @@ plugin.methods.register_function(
 )
 
 
+}
+
+
+importlib.import_module('q2_abundance_filtering._transformer')

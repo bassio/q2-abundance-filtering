@@ -1,7 +1,7 @@
 import gzip
 import hashlib
 from io import StringIO
-
+from collections import Counter
 import pandas as pd
 import biom
 import skbio
@@ -14,220 +14,184 @@ from q2_types.per_sample_sequences import (
             )
 
 
-def biomtable_to_dataframe(biom_table_object):
-  _bt = biom_table_object
-  data = _bt.matrix_data.todense()
-  df = pd.DataFrame(data, index=_bt.ids('observation'),
-                           columns=_bt.ids('sample'))
-  return df
+from ._abundance_filter import abundance_filter_threshold_Wang_et_al
 
 
-def _rarefy_series(series, n, num_reps=1):
-
-    series_name = series.name
-
-    if n == 0:
-        sampled_series = pd.Series(0, index=series.index, name=series.name)
-        return sampled_series
-
-    sampled_series = series.sample(n, replace=True, weights=series)
-    sampled_value_counts = sampled_series.index.value_counts()
-    sampled_value_counts.name = series_name
-
-    if num_reps == 1:
-        return sampled_value_counts
-    elif num_reps > 1:
-        for r in range(num_reps - 1):
-            next_sampled_series = series.sample(n, replace=True, weights=series)
-            next_sampled_value_counts = next_sampled_series.index.value_counts()
-
-            sampled_value_counts = pd.concat([sampled_value_counts, next_sampled_value_counts], axis=1).fillna(0).sum(axis=1)
-            sampled_value_counts.name = series_name
-            print(sampled_value_counts.sort_values(ascending=False))
-
-            del next_sampled_series
-            del next_sampled_value_counts
-
-        sampled_value_counts = sampled_value_counts.sample(n, replace=True, weights=sampled_value_counts).index.value_counts()
-        sampled_value_counts.name = series_name
-
-        return sampled_value_counts
-
-
-def _bootstrap_series_concatenate(series, num_reps=1):
-    series_sum = series.sum()
+def return_sample_ids(demux: SingleLanePerSampleSingleEndFastqDirFmt):
+    demux_manifest = demux.manifest.view(demux.manifest.format)
     
-    series_list = [_rarefy_series(series, series_sum, num_reps=1) 
-                   for i in range(num_reps)]
+    with demux_manifest.open() as f:
+        manifest_df = pd.read_csv(f, dtype=str, comment='#')
     
-    return pd.concat(series_list, axis=1).fillna(0)
+    return list(manifest_df['sample-id'])
 
 
-def abundance_filter_threshold_Wang_et_al(counts_df):
-    counts_series = counts_df[counts_df.columns[0]].sort_values(ascending=False)
+def return_fastqgz_path_for_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
+                                   sample_id: str):
+    #barcode ID, lane number and read number are not relevant here
+    return demux.sequences.path_maker(sample_id=sample_id,
+                                        barcode_id=1,
+                                        lane_number=1,
+                                        read_number=1)
 
-    bootstrap_df = _bootstrap_series_concatenate(counts_series, num_reps=1000)
-    bootstrap_df_transposed = bootstrap_df.transpose()
 
-
-    abund_real = counts_series.copy()
-
-    abund_boot = bootstrap_df_transposed.mean().sort_values(ascending=False)
-    abund_995 = bootstrap_df_transposed.quantile(0.995)
-    abund_005 = bootstrap_df_transposed.quantile(0.005)
-
-    abund_adj = (2 * abund_real) - abund_boot
-    abund_adj = abund_adj.sort_values(ascending=False).fillna(0)
+def return_fastq_seqs_for_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
+                            sample_id: str):
     
-    ci99_higher = abund_adj + (abund_995 - abund_boot)
-    ci99_higher = ci99_higher.sort_values(ascending=False).fillna(0)
-
-    ci99_lower = abund_adj - (abund_boot - abund_005)
-    ci99_lower = ci99_lower.sort_values(ascending=False)
+    demux_manifest = demux.manifest.view(demux.manifest.format)
     
-    unreliable = ci99_lower[ci99_lower <= 0].index
-
-    threshold = int(counts_series[unreliable].sort_values(ascending=False)[0])
+    with demux_manifest.open() as f:
+        manifest_df = pd.read_csv(f, dtype=str, comment='#')
+        manifest_df.set_index('sample-id', inplace=True)
     
-    return threshold
+    filename = manifest_df.loc[str(sample_id)]['filename']
+    
+    fastqz_pth = demux.path / filename
+    
+    seqs_iterator = skbio.io.read(str(fastqz_pth), format='fastq')
+    
+    return seqs_iterator
 
 
-#adapted with modifications from q2-vsearch and q2-quality-filter
-def abundance_filter_seqs(demux: SingleLanePerSampleSingleEndFastqDirFmt,
-                          filtered_counts_df: pd.DataFrame) -> SingleLanePerSampleSingleEndFastqDirFmt:
+def sample_counts_series(demux: SingleLanePerSampleSingleEndFastqDirFmt,
+                     sample_id: str) -> pd.Series:
+    
+    c = Counter([str(seq) for seq in return_fastq_seqs_for_sample(demux, sample_id)])
+    
+    return pd.Series(c, name=sample_id).sort_values(ascending=False)
+
+
+def abundance_filter_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
+                                  sample_id: str):
+    
+    stats_dict = {}
+    stats_dict['sample-id'] = sample_id
+    
+    counts_series = sample_counts_series(demux, sample_id)
+    
+    stats_dict['n_input_seqs'] = counts_series.sum()    
+    
+    threshold = abundance_filter_threshold_Wang_et_al(counts_series)
+    stats_dict['threshold'] = threshold
+    
+    abundance_filtered_series = counts_series[counts_series > threshold].copy()
+    
+    n_seqs_kept = abundance_filtered_series.sum()
+    stats_dict['n_seqs_kept'] = n_seqs_kept
+    
+    n_seqs_unique_kept = len(abundance_filtered_series.index)
+    stats_dict['n_seqs_unique_kept'] = n_seqs_unique_kept
+    
+    
+    demux_metadata_view = demux.metadata.view(YamlFormat)
+    with open(str(demux_metadata_view)) as demux_metadata_fh:
+        demux_metadata_dict = yaml.load(demux_metadata_fh)
+        phred_offset = demux_metadata_dict['phred-offset']
+    
+    seq_strIO = StringIO()
+    for seq in return_fastq_for_sample(demux, sample_id):
+        if str(seq) in abundance_filtered_series.index:
+            skbio.io.write(seq, format='fastq', phred_offset=phred_offset, into=seq_strIO)
+    
+    fastq_gz_pth = return_fastqgz_path_for_sample(demux, sample_id)
+    
+    new_fastqgz = FastqGzFormat()
+    #write into the new gzipped fastq file
+    seq_strIO.seek(0)
+    writer = gzip.open(str(new_fastqgz.path), mode='w')
+    writer.write(bytes(seq_strIO.read(), encoding="UTF-8"))
+    writer.close()
+    
+    return new_fastqgz, stats_dict
+
+
+
+def return_final_result(original_sequences: SingleLanePerSampleSingleEndFastqDirFmt,
+                        sample_fastqgz_mapping: dict,
+                        stats_df: pd.DataFrame) -> SingleLanePerSampleSingleEndFastqDirFmt:
+    
+    demux = original_sequences
     
     result = SingleLanePerSampleSingleEndFastqDirFmt()
-
+    
+    #exclude those sample with resulting zero sequences after filtering
+    #since a fastq file with zero sequences is invalid
+    sample_ids_to_include = list(stats_df[stats_df['n_seqs_kept'] > 0]['sample-id'])
+    
+    #exit with error here
+    if len(sample_ids_to_include) == 0:
+        raise ValueError("All sequences from all samples were filtered out through abundance-filtering.")
+    
+    
+    #initiate the manifest
     manifest = FastqManifestFormat()
     manifest_fh = manifest.open()
     manifest_fh.write('sample-id,filename,direction\n')
     manifest_fh.write('# direction is not meaningful in this file as these\n')
     manifest_fh.write('# data may be derived from forward, reverse, or \n')
     manifest_fh.write('# joined reads\n')
-
-    log_records_totalread_counts = {}
-
-    demux_metadata_view = demux.metadata.view(YamlFormat)
     
-    with open(str(demux_metadata_view)) as demux_metadata_fh:
-        demux_metadata_dict = yaml.load(demux_metadata_fh)
-        phred_offset = demux_metadata_dict['phred-offset']
     
-    demux_manifest = demux.manifest.view(demux.manifest.format)
-    demux_manifest = pd.read_csv(demux_manifest.open(), dtype=str, comment='#')
-    demux_manifest.set_index('filename', inplace=True)
-    
-    iterator = demux.sequences.iter_views(FastqGzFormat)
-    
-    for i, (fname, fastqz) in enumerate(iterator):
-        sample_id = demux_manifest.loc[str(fname)]['sample-id']
+    for sample_id in sample_ids_to_include:
                 
-        # per q2-demux, barcode ID, lane number and read number are not
-        # relevant here
-        path = result.sequences.path_maker(sample_id=sample_id,
-                                           barcode_id=i,
-                                           lane_number=1,
-                                           read_number=1)
-
-        # we do not open a writer by default in the event that all sequences
-        # for a sample are filtered out; an empty fastq file is not a valid
-        # fastq file.
-        writer = None
+        fastqgz = sample_fastqgz_mapping[sample_id] #a FastqGzFormat object
         
-        seqs_iterator = skbio.io.read(str(fastqz), format='fastq')
+        path = return_fastqgz_path_for_sample(demux, sample_id=sample_id)
         
-        sampled_counts_series = filtered_counts_df[sample_id]
-        seqs_in_sample = list(sampled_counts_series[sampled_counts_series > 0].index)
-
-  
-        log_records_totalread_counts[sample_id] = 0
-
-        for seq in seqs_iterator:
-            sha1_hash = hashlib.sha1(seq._string).hexdigest()
-            if sha1_hash in seqs_in_sample:
-                log_records_totalread_counts[sample_id] += 1
-                if writer is None:
-                    writer = gzip.open(str(path), mode='w')
-            
-                seq_strIO = StringIO()
-                skbio.io.write(seq, format='fastq', phred_offset=phred_offset, into=seq_strIO)
-                seq_string = seq_strIO.getvalue()
-
-                writer.write(seq_string.encode('utf-8'))
-                
-        if writer is not None:
-            manifest_fh.write('%s,%s,%s\n' % (sample_id, path.name, 'forward'))
-            
-            writer.close()
-            
+        #barcode ID, lane number and read number are not relevant here
+        new_demux.sequences.write_data(fastqgz, FastqGzFormat,
+                                       sample_id=sample_id,
+                                       barcode_id=1,
+                                       lane_number=1,
+                                       read_number=1)
+        
+        
+        manifest_fh.write('{sample_id},{filename},{}\n'.format(sample_id=sample_id,
+                                                               filename=path.name,
+                                                               direction='forward'))
     
-    if set(log_records_totalread_counts.values()) == {0, }:
-        raise ValueError("All sequences from all samples were filtered out. "
-                         "The parameter choices may be too stringent for the "
-                         "data.")
-
+    
+    #Final writes ...
+    
+    ###manifest
     manifest_fh.close()
     result.manifest.write_data(manifest, FastqManifestFormat)
-
+    
+    ###metadata
+    demux_metadata_view = demux.metadata.view(YamlFormat)
+    with open(str(demux_metadata_view)) as demux_metadata_fh:
+        demux_metadata_dict = yaml.load(demux_metadata_fh)
     metadata = YamlFormat()
     metadata.path.write_text(yaml.dump(demux_metadata_dict))
     result.metadata.write_data(metadata, YamlFormat)
-
-
+    
+    
     return result
 
 
 
 def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> SingleLanePerSampleSingleEndFastqDirFmt:
     
-    from qiime2 import Artifact
-    from qiime2.plugins.vsearch.methods import dereplicate_sequences
+    list_of_stats_dicts = []
+    
+    sample_fastqgz_mapping = {}
+    
+    for sample_id in return_sample_ids(sequences):
+        
+        fastqgz, stats_dict = abundance_filter_sample(sequences, sample_id)
+        sample_fastqgz_mapping[sample_id] = fastqgz
+        list_of_stats_dicts.append(stats_dict)
+        
+    stats_df_cols = ['sample-id', 'threshold', 'n_input_seqs', 'n_seqs_kept', 'n_seqs_unique_kept']
+    
+    stats_df = pd.DataFrame(list_of_stats_dicts)
+    stats_df = stats_df[stats_df_cols]
+    
+    
+    abundance_filtered_result = return_final_result(sequences,
+                                                    sample_fastqgz_mapping,
+                                                    stats_df)
+    
+    return sample_fastqgz_mapping, stats_df
 
-    sequences_with_type = Artifact.import_data("SampleData[SequencesWithQuality]", sequences)
-    
-    from q2_vsearch._cluster_sequences import dereplicate_sequences as plugin_dereplicate_sequences
-    
-    dereplicated_table, derep_sequences = plugin_dereplicate_sequences(sequences_with_type.view(QIIME1DemuxDirFmt))
-
-    counts_df = biomtable_to_dataframe(dereplicated_table).astype(int)
-    
-    #list to keep track of 
-    #abundance-filtered seq counts for each sample as series;
-    #after the loop we 'concat' them into a dataframe
-    sample_series_lst = []
-    
-    for sample in counts_df.columns:
-        
-        sample_col = counts_df[sample]
-        
-        threshold = abundance_filter_threshold_Wang_et_al(sample_col.to_frame())
-    
-        sample_series = sample_col[sample_col > threshold].copy()
-
-        sample_series_lst.append(sample_series)
-        
-        seq_ids_to_keep = sample_series.index
-        
-        n_kept = sample_col[seq_ids_to_keep].sum()
-        
-        n_unique_kept = len(list(seq_ids_to_keep))
-        
-        print("Abundance filtering threshold for sample {} set at > {} counts. {} sequences ({} unique) kept.".format(sample,
-                                                                                                                   str(threshold),
-                                                                                                                   str(n_kept),
-                                                                                                                   str(n_unique_kept)))
-    
-    filtered_df = pd.concat(sample_series_lst, axis=1)
-    filtered_df = filtered_df.fillna(0).astype(int)
-    
-    #exclude these sequences that were excluded from all samples
-    sum_series = filtered_df.sum(axis=1)
-    zero_sum_sequences = sum_series[sum_series > 0].index
-    filtered_df = filtered_df.reindex(zero_sum_sequences)
-    
-
-    af_seqs = abundance_filter_seqs(demux=sequences,
-                                    filtered_counts_df=filtered_df)
-    
-    return af_seqs
 
