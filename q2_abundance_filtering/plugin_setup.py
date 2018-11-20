@@ -1,4 +1,4 @@
-
+import importlib
 import qiime2.plugin
 from q2_types.feature_data import FeatureData, Sequence
 from q2_types.feature_table import FeatureTable, Frequency
@@ -56,8 +56,6 @@ plugin.methods.register_function(
                  'Outputs the filtered sequences.')
 )
 
-
-}
 
 
 importlib.import_module('q2_abundance_filtering._transformer')

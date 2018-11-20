@@ -89,7 +89,7 @@ def abundance_filter_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
         phred_offset = demux_metadata_dict['phred-offset']
     
     seq_strIO = StringIO()
-    for seq in return_fastq_for_sample(demux, sample_id):
+    for seq in return_fastq_seqs_for_sample(demux, sample_id):
         if str(seq) in abundance_filtered_series.index:
             skbio.io.write(seq, format='fastq', phred_offset=phred_offset, into=seq_strIO)
     
@@ -139,14 +139,14 @@ def return_final_result(original_sequences: SingleLanePerSampleSingleEndFastqDir
         path = return_fastqgz_path_for_sample(demux, sample_id=sample_id)
         
         #barcode ID, lane number and read number are not relevant here
-        new_demux.sequences.write_data(fastqgz, FastqGzFormat,
-                                       sample_id=sample_id,
-                                       barcode_id=1,
-                                       lane_number=1,
-                                       read_number=1)
+        result.sequences.write_data(fastqgz, FastqGzFormat,
+                                    sample_id=sample_id,
+                                    barcode_id=1,
+                                    lane_number=1,
+                                    read_number=1)
         
         
-        manifest_fh.write('{sample_id},{filename},{}\n'.format(sample_id=sample_id,
+        manifest_fh.write('{sample_id},{filename},{direction}\n'.format(sample_id=sample_id,
                                                                filename=path.name,
                                                                direction='forward'))
     
@@ -170,7 +170,8 @@ def return_final_result(original_sequences: SingleLanePerSampleSingleEndFastqDir
 
 
 
-def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> SingleLanePerSampleSingleEndFastqDirFmt:
+def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> (SingleLanePerSampleSingleEndFastqDirFmt, 
+                                                                            pd.DataFrame):
     
     list_of_stats_dicts = []
     
@@ -192,6 +193,6 @@ def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> Singl
                                                     sample_fastqgz_mapping,
                                                     stats_df)
     
-    return sample_fastqgz_mapping, stats_df
+    return abundance_filtered_result, stats_df
 
 

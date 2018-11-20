@@ -16,6 +16,7 @@ class AbundanceFilteringStatsFmt(model.TextFileFormat):
     def sniff(self):
         line = open(str(self)).readline()
         hdr = line.strip().split(',')
+        print(line, hdr)
         return hdr == STATS_HEADER
 
 
