@@ -37,6 +37,7 @@ plugin.methods.register_function(
         }
     ,
     parameters={
+        'threads': qiime2.plugin.Int % qiime2.plugin.Range(1, None),
     },
     outputs=[
         ('filtered_sequences', SampleData[SequencesWithQuality]),
@@ -46,6 +47,7 @@ plugin.methods.register_function(
         'sequences': "The input sequences."
     },
     parameter_descriptions={
+        'threads': "Number of threads to run (uses python's multiprocessing module Pool)."
     },
     output_descriptions={
         'filtered_sequences': 'The filtered sequences.',

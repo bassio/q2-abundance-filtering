@@ -2,6 +2,7 @@ import gzip
 import hashlib
 from io import StringIO
 from collections import Counter
+from multiprocessing import Pool
 import pandas as pd
 import biom
 import skbio
@@ -15,6 +16,7 @@ from q2_types.per_sample_sequences import (
 
 
 from ._abundance_filter import abundance_filter_threshold_Wang_et_al
+
 
 
 def return_sample_ids(demux: SingleLanePerSampleSingleEndFastqDirFmt):
@@ -64,6 +66,8 @@ def sample_counts_series(demux: SingleLanePerSampleSingleEndFastqDirFmt,
 def abundance_filter_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
                                   sample_id: str):
     
+    print("Commencing abundance-filtering for sample {}".format(sample_id))
+    
     stats_dict = {}
     stats_dict['sample-id'] = sample_id
     
@@ -81,7 +85,6 @@ def abundance_filter_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
     
     n_seqs_unique_kept = len(abundance_filtered_series.index)
     stats_dict['n_seqs_unique_kept'] = n_seqs_unique_kept
-    
     
     demux_metadata_view = demux.metadata.view(YamlFormat)
     with open(str(demux_metadata_view)) as demux_metadata_fh:
@@ -104,6 +107,17 @@ def abundance_filter_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
     
     return new_fastqgz, stats_dict
 
+
+def abundance_filter_sample_mp(demux_path_str: SingleLanePerSampleSingleEndFastqDirFmt,
+                               sample_id: str):
+    demux = SingleLanePerSampleSingleEndFastqDirFmt(str(demux_path_str), mode='r')
+    new_fastqgz, stats_dict = abundance_filter_sample(demux, sample_id)
+    
+    fastqgz_hndl = open(str(new_fastqgz), mode='r')
+    
+    #manager_dict[sample_id] = fastqgz_hndl.buffer.read()
+    
+    return fastqgz_hndl.buffer.read(), stats_dict
 
 
 def return_final_result(original_sequences: SingleLanePerSampleSingleEndFastqDirFmt,
@@ -169,8 +183,7 @@ def return_final_result(original_sequences: SingleLanePerSampleSingleEndFastqDir
     return result
 
 
-
-def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> (SingleLanePerSampleSingleEndFastqDirFmt, 
+def abundance_filter_single_thread(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> (SingleLanePerSampleSingleEndFastqDirFmt, 
                                                                             pd.DataFrame):
     
     list_of_stats_dicts = []
@@ -195,4 +208,54 @@ def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> (Sing
     
     return abundance_filtered_result, stats_df
 
+
+def abundance_filter_pool(sequences:SingleLanePerSampleSingleEndFastqDirFmt,
+                          threads:int) -> (SingleLanePerSampleSingleEndFastqDirFmt, 
+                                             pd.DataFrame):
+    
+    list_of_stats_dicts = []
+    
+    sample_fastqgz_mapping = {}
+    
+    sample_ids = return_sample_ids(sequences)
+
+    with Pool(processes=threads) as pool:
+        iterable = [(str(sequences), sample_id)
+                    for sample_id in sample_ids]
+                    
+        results = pool.starmap(abundance_filter_sample_mp,
+                        iterable
+                            )
+        
+        
+    for fastqgz_bytes, stats_dict in results:
+        fastqgz = FastqGzFormat()
+        
+        #write the bytes into the new gzipped fastq file
+        with open(str(fastqgz.path), mode='wb') as f:
+            f.write(fastqgz_bytes)
+        
+        sample_fastqgz_mapping[stats_dict['sample-id']] = fastqgz
+        list_of_stats_dicts.append(stats_dict)
+            
+    stats_df_cols = ['sample-id', 'threshold', 'n_input_seqs', 'n_seqs_kept', 'n_seqs_unique_kept']
+    
+    stats_df = pd.DataFrame(list_of_stats_dicts)
+    stats_df = stats_df[stats_df_cols]
+    
+    
+    abundance_filtered_result = return_final_result(sequences,
+                                                    sample_fastqgz_mapping,
+                                                    stats_df)
+    
+    return abundance_filtered_result, stats_df
+
+
+def abundance_filter(sequences:SingleLanePerSampleSingleEndFastqDirFmt,
+                          threads:int = 1) -> (SingleLanePerSampleSingleEndFastqDirFmt, 
+                                             pd.DataFrame):
+    if threads == 1:
+        return abundance_filter_single_thread(sequences)
+    else:
+        return abundance_filter_pool(sequences, threads)
 
