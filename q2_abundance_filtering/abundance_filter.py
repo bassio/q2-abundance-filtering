@@ -66,8 +66,8 @@ def sample_counts_series(demux: SingleLanePerSampleSingleEndFastqDirFmt,
 
 
 def abundance_filter_sample(demux_path_str: SingleLanePerSampleSingleEndFastqDirFmt,
-                               sample_id: str,
-                               new_demux_path_str: SingleLanePerSampleSingleEndFastqDirFmt):
+                            sample_id: str,
+                            new_demux_path_str: SingleLanePerSampleSingleEndFastqDirFmt):
     
     print("Commencing abundance-filtering for sample {}".format(sample_id))
 
@@ -103,6 +103,10 @@ def abundance_filter_sample(demux_path_str: SingleLanePerSampleSingleEndFastqDir
                                                       lane_number=1,
                                                       read_number=1)
     
+    #skip writing into the gzipped file below if sequences = 0
+    if stats_dict['n_seqs_kept'] == 0:
+        return str(new_fastqgz_path), stats_dict
+    
     
     with gzip.open(str(new_fastqgz_path), mode='w') as writer:
         for seq in return_fastq_seqs_for_sample(demux, sample_id):
@@ -119,7 +123,6 @@ def abundance_filter_sample(demux_path_str: SingleLanePerSampleSingleEndFastqDir
 
 def finalize_result(original_sequences: SingleLanePerSampleSingleEndFastqDirFmt,
                     result_sequences: SingleLanePerSampleSingleEndFastqDirFmt,
-                    sample_fastqgz_mapping: dict,
                     stats_df: pd.DataFrame) -> SingleLanePerSampleSingleEndFastqDirFmt:
     
     print("in finalize result")
@@ -169,9 +172,7 @@ def finalize_result(original_sequences: SingleLanePerSampleSingleEndFastqDirFmt,
 def abundance_filter_single_thread(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> (SingleLanePerSampleSingleEndFastqDirFmt, 
                                                                             pd.DataFrame):
     list_of_stats_dicts = []
-    
-    sample_fastqgz_mapping = {}
-    
+        
     result = SingleLanePerSampleSingleEndFastqDirFmt()
     
     sample_ids = return_sample_ids(sequences)
@@ -182,9 +183,7 @@ def abundance_filter_single_thread(sequences:SingleLanePerSampleSingleEndFastqDi
                                                    new_demux_path_str=str(result))
         
         fastqgz_pth_str, stats_dict = sample_result[0], sample_result[1]
-        fastqgz = FastqGzFormat(fastqgz_pth_str, mode='r')
             
-        sample_fastqgz_mapping[stats_dict['sample-id']] = fastqgz
         list_of_stats_dicts.append(stats_dict)
         
     
@@ -193,7 +192,6 @@ def abundance_filter_single_thread(sequences:SingleLanePerSampleSingleEndFastqDi
     
     abundance_filtered_result = finalize_result(sequences,
                                                 result,
-                                                sample_fastqgz_mapping,
                                                 stats_df)
     
     return abundance_filtered_result, stats_df
@@ -204,9 +202,7 @@ def abundance_filter_pool(sequences:SingleLanePerSampleSingleEndFastqDirFmt,
                                              pd.DataFrame):
     
     list_of_stats_dicts = []
-    
-    sample_fastqgz_mapping = {}
-    
+        
     result = SingleLanePerSampleSingleEndFastqDirFmt()
     
     sample_ids = return_sample_ids(sequences)
@@ -220,9 +216,6 @@ def abundance_filter_pool(sequences:SingleLanePerSampleSingleEndFastqDirFmt,
                         iterable)
         
         for fastqgz_pth_str, stats_dict in sample_results:
-            fastqgz = FastqGzFormat(fastqgz_pth_str, mode='r')
-            
-            sample_fastqgz_mapping[stats_dict['sample-id']] = fastqgz
             list_of_stats_dicts.append(stats_dict)
             
     
@@ -231,7 +224,6 @@ def abundance_filter_pool(sequences:SingleLanePerSampleSingleEndFastqDirFmt,
     
     abundance_filtered_result = finalize_result(sequences,
                                                 result,
-                                                sample_fastqgz_mapping,
                                                 stats_df)
     
     return abundance_filtered_result, stats_df
