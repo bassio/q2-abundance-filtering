@@ -60,7 +60,7 @@ def return_fastq_seqs_for_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
 def sample_counts_series(demux: SingleLanePerSampleSingleEndFastqDirFmt,
                      sample_id: str) -> pd.Series:
     
-    c = Counter([str(seq) for seq in return_fastq_seqs_for_sample(demux, sample_id)])
+    c = Counter((str(seq) for seq in return_fastq_seqs_for_sample(demux, sample_id)))
     
     return pd.Series(c, name=sample_id).sort_values(ascending=False)
 
