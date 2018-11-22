@@ -18,6 +18,8 @@ from q2_types.per_sample_sequences import (
 from ._abundance_filter import abundance_filter_threshold_Wang_et_al
 
 
+STATS_COLUMNS = ['sample-id', 'threshold', 'n_input_seqs', 'n_seqs_kept', 'n_seqs_unique_kept']
+
 
 def return_sample_ids(demux: SingleLanePerSampleSingleEndFastqDirFmt):
     demux_manifest = demux.manifest.view(demux.manifest.format)
@@ -63,10 +65,15 @@ def sample_counts_series(demux: SingleLanePerSampleSingleEndFastqDirFmt,
     return pd.Series(c, name=sample_id).sort_values(ascending=False)
 
 
-def abundance_filter_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
-                                  sample_id: str):
+def abundance_filter_sample(demux_path_str: SingleLanePerSampleSingleEndFastqDirFmt,
+                               sample_id: str,
+                               new_demux_path_str: SingleLanePerSampleSingleEndFastqDirFmt):
     
     print("Commencing abundance-filtering for sample {}".format(sample_id))
+
+    demux = SingleLanePerSampleSingleEndFastqDirFmt(demux_path_str, mode='r')
+    new_demux = SingleLanePerSampleSingleEndFastqDirFmt(new_demux_path_str, mode='r')
+            
     
     stats_dict = {}
     stats_dict['sample-id'] = sample_id
@@ -91,42 +98,35 @@ def abundance_filter_sample(demux: SingleLanePerSampleSingleEndFastqDirFmt,
         demux_metadata_dict = yaml.load(demux_metadata_fh)
         phred_offset = demux_metadata_dict['phred-offset']
     
-    seq_strIO = StringIO()
-    for seq in return_fastq_seqs_for_sample(demux, sample_id):
-        if str(seq) in abundance_filtered_series.index:
-            skbio.io.write(seq, format='fastq', phred_offset=phred_offset, into=seq_strIO)
+    new_fastqgz_path = new_demux.sequences.path_maker(sample_id=sample_id,
+                                                      barcode_id=1,
+                                                      lane_number=1,
+                                                      read_number=1)
     
-    fastq_gz_pth = return_fastqgz_path_for_sample(demux, sample_id)
     
-    new_fastqgz = FastqGzFormat()
-    #write into the new gzipped fastq file
-    seq_strIO.seek(0)
-    writer = gzip.open(str(new_fastqgz.path), mode='w')
-    writer.write(bytes(seq_strIO.read(), encoding="UTF-8"))
-    writer.close()
-    
-    return new_fastqgz, stats_dict
+    with gzip.open(str(new_fastqgz_path), mode='w') as writer:
+        for seq in return_fastq_seqs_for_sample(demux, sample_id):
+            if str(seq) in abundance_filtered_series.index:
+                seq_strIO = StringIO()
+                skbio.io.write(seq, format='fastq', phred_offset=phred_offset, into=seq_strIO)
+                
+                writer.write(bytes(seq_strIO.read(), encoding="UTF-8"))
+        
+        
+    return str(new_fastqgz_path), stats_dict
 
 
-def abundance_filter_sample_mp(demux_path_str: SingleLanePerSampleSingleEndFastqDirFmt,
-                               sample_id: str):
-    demux = SingleLanePerSampleSingleEndFastqDirFmt(str(demux_path_str), mode='r')
-    new_fastqgz, stats_dict = abundance_filter_sample(demux, sample_id)
-    
-    fastqgz_hndl = open(str(new_fastqgz), mode='r')
-    
-    #manager_dict[sample_id] = fastqgz_hndl.buffer.read()
-    
-    return fastqgz_hndl.buffer.read(), stats_dict
 
-
-def return_final_result(original_sequences: SingleLanePerSampleSingleEndFastqDirFmt,
-                        sample_fastqgz_mapping: dict,
-                        stats_df: pd.DataFrame) -> SingleLanePerSampleSingleEndFastqDirFmt:
+def finalize_result(original_sequences: SingleLanePerSampleSingleEndFastqDirFmt,
+                    result_sequences: SingleLanePerSampleSingleEndFastqDirFmt,
+                    sample_fastqgz_mapping: dict,
+                    stats_df: pd.DataFrame) -> SingleLanePerSampleSingleEndFastqDirFmt:
+    
+    print("in finalize result")
     
     demux = original_sequences
     
-    result = SingleLanePerSampleSingleEndFastqDirFmt()
+    result = result_sequences
     
     #exclude those sample with resulting zero sequences after filtering
     #since a fastq file with zero sequences is invalid
@@ -137,7 +137,7 @@ def return_final_result(original_sequences: SingleLanePerSampleSingleEndFastqDir
         raise ValueError("All sequences from all samples were filtered out through abundance-filtering.")
     
     
-    #initiate the manifest
+    #manifest
     manifest = FastqManifestFormat()
     manifest_fh = manifest.open()
     manifest_fh.write('sample-id,filename,direction\n')
@@ -145,29 +145,12 @@ def return_final_result(original_sequences: SingleLanePerSampleSingleEndFastqDir
     manifest_fh.write('# data may be derived from forward, reverse, or \n')
     manifest_fh.write('# joined reads\n')
     
-    
     for sample_id in sample_ids_to_include:
-                
-        fastqgz = sample_fastqgz_mapping[sample_id] #a FastqGzFormat object
-        
         path = return_fastqgz_path_for_sample(demux, sample_id=sample_id)
-        
-        #barcode ID, lane number and read number are not relevant here
-        result.sequences.write_data(fastqgz, FastqGzFormat,
-                                    sample_id=sample_id,
-                                    barcode_id=1,
-                                    lane_number=1,
-                                    read_number=1)
-        
-        
         manifest_fh.write('{sample_id},{filename},{direction}\n'.format(sample_id=sample_id,
                                                                filename=path.name,
                                                                direction='forward'))
     
-    
-    #Final writes ...
-    
-    ###manifest
     manifest_fh.close()
     result.manifest.write_data(manifest, FastqManifestFormat)
     
@@ -182,29 +165,36 @@ def return_final_result(original_sequences: SingleLanePerSampleSingleEndFastqDir
     
     return result
 
-
+    
 def abundance_filter_single_thread(sequences:SingleLanePerSampleSingleEndFastqDirFmt) -> (SingleLanePerSampleSingleEndFastqDirFmt, 
                                                                             pd.DataFrame):
-    
     list_of_stats_dicts = []
     
     sample_fastqgz_mapping = {}
     
-    for sample_id in return_sample_ids(sequences):
+    result = SingleLanePerSampleSingleEndFastqDirFmt()
+    
+    sample_ids = return_sample_ids(sequences)
+    
+    for sample_id in sample_ids:
+        sample_result = abundance_filter_sample(demux_path_str=str(sequences),
+                                                   sample_id=sample_id,
+                                                   new_demux_path_str=str(result))
         
-        fastqgz, stats_dict = abundance_filter_sample(sequences, sample_id)
-        sample_fastqgz_mapping[sample_id] = fastqgz
+        fastqgz_pth_str, stats_dict = sample_result[0], sample_result[1]
+        fastqgz = FastqGzFormat(fastqgz_pth_str, mode='r')
+            
+        sample_fastqgz_mapping[stats_dict['sample-id']] = fastqgz
         list_of_stats_dicts.append(stats_dict)
         
-    stats_df_cols = ['sample-id', 'threshold', 'n_input_seqs', 'n_seqs_kept', 'n_seqs_unique_kept']
     
     stats_df = pd.DataFrame(list_of_stats_dicts)
-    stats_df = stats_df[stats_df_cols]
+    stats_df = stats_df[STATS_COLUMNS]
     
-    
-    abundance_filtered_result = return_final_result(sequences,
-                                                    sample_fastqgz_mapping,
-                                                    stats_df)
+    abundance_filtered_result = finalize_result(sequences,
+                                                result,
+                                                sample_fastqgz_mapping,
+                                                stats_df)
     
     return abundance_filtered_result, stats_df
 
@@ -217,36 +207,32 @@ def abundance_filter_pool(sequences:SingleLanePerSampleSingleEndFastqDirFmt,
     
     sample_fastqgz_mapping = {}
     
+    result = SingleLanePerSampleSingleEndFastqDirFmt()
+    
     sample_ids = return_sample_ids(sequences)
+    
 
     with Pool(processes=threads) as pool:
-        iterable = [(str(sequences), sample_id)
+        iterable = [(str(sequences), sample_id, str(result))
                     for sample_id in sample_ids]
                     
-        results = pool.starmap(abundance_filter_sample_mp,
-                        iterable
-                            )
+        sample_results = pool.starmap(abundance_filter_sample,
+                        iterable)
         
-        
-    for fastqgz_bytes, stats_dict in results:
-        fastqgz = FastqGzFormat()
-        
-        #write the bytes into the new gzipped fastq file
-        with open(str(fastqgz.path), mode='wb') as f:
-            f.write(fastqgz_bytes)
-        
-        sample_fastqgz_mapping[stats_dict['sample-id']] = fastqgz
-        list_of_stats_dicts.append(stats_dict)
+        for fastqgz_pth_str, stats_dict in sample_results:
+            fastqgz = FastqGzFormat(fastqgz_pth_str, mode='r')
             
-    stats_df_cols = ['sample-id', 'threshold', 'n_input_seqs', 'n_seqs_kept', 'n_seqs_unique_kept']
+            sample_fastqgz_mapping[stats_dict['sample-id']] = fastqgz
+            list_of_stats_dicts.append(stats_dict)
+            
     
     stats_df = pd.DataFrame(list_of_stats_dicts)
-    stats_df = stats_df[stats_df_cols]
+    stats_df = stats_df[STATS_COLUMNS]
     
-    
-    abundance_filtered_result = return_final_result(sequences,
-                                                    sample_fastqgz_mapping,
-                                                    stats_df)
+    abundance_filtered_result = finalize_result(sequences,
+                                                result,
+                                                sample_fastqgz_mapping,
+                                                stats_df)
     
     return abundance_filtered_result, stats_df
 
